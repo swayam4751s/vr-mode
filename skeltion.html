@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html>
+<!-- Previous head section and styles remain unchanged -->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VR Video Player</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            font-family: Arial, sans-serif;
+        }
+        #container { 
+            width: 100vw; 
+            height: 100vh; 
+            position: relative;
+        }
+        #controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 1000;
+        }
+        button {
+            background: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 0 5px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        #fileInput {
+            display: none;
+        }
+        #uploadLabel {
+            background: #2196F3;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 0 5px;
+        }
+        #uploadLabel:hover {
+            background: #1976D2;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="controls">
+        <input type="file" id="fileInput" accept="video/*">
+        <label for="fileInput" id="uploadLabel">Choose Video</label>
+        <button id="playButton">Play</button>
+        <button id="splitButton">Split Screen</button>
+        <button id="vrButton">Enter VR</button>
+        <button id="gyroButton">Enable Gyroscope</button>
+    </div>
+
+    <script>
+        let scene, camera, renderer, video, videoTexture;
+        let leftCamera, rightCamera;
+        let isPlaying = false;
+        let isSplitScreen = false;
+        let isUsingGyro = false;
+        
+        // Mouse control variables
+        let isMouseDown = false;
+        let mouseX = 0;
+        let mouseY = 0;
+        let targetRotationX = 0;
+        let targetRotationY = 0;
+        let currentRotationX = 0;
+        let currentRotationY = 0;
+
+        // Device orientation variables
+        let deviceAlpha = 0;
+        let deviceBeta = 0;
+        let deviceGamma = 0;
+        let initialOrientation = null;
+
+        init();
+        animate();
+
+        function init() {
+            // ... (keep all initialization code the same)
+            scene = new THREE.Scene();
+            
+            // Main camera for non-VR mode
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 0.01;
+
+            // Stereo cameras for split screen - adjusted for better VR viewing
+            const aspectRatio = (window.innerWidth / 2) / window.innerHeight;
+            leftCamera = new THREE.PerspectiveCamera(75, aspectRatio, 0.1, 1000);
+            rightCamera = new THREE.PerspectiveCamera(75, aspectRatio, 0.1, 1000);
+            
+            // Adjusted eye separation for better VR experience
+            const eyeSeparation = 0.032; // Reduced from 0.064 for more comfortable viewing
+            leftCamera.position.set(-eyeSeparation/2, 0, 0.01);
+            rightCamera.position.set(eyeSeparation/2, 0, 0.01);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.xr.enabled = true;
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            // Create video element
+            video = document.createElement('video');
+            video.loop = true;
+            video.crossOrigin = 'anonymous';
+            video.playsInline = true;
+
+            // Create video texture
+            videoTexture = new THREE.VideoTexture(video);
+            videoTexture.minFilter = THREE.LinearFilter;
+            videoTexture.magFilter = THREE.LinearFilter;
+
+            // Create sphere for panoramic view
+            const geometry = new THREE.SphereGeometry(500, 60, 40);
+            geometry.scale(-1, 1, 1);
+
+            const material = new THREE.MeshBasicMaterial({ map: videoTexture });
+            const sphere = new THREE.Mesh(geometry, material);
+            scene.add(sphere);
+
+            // Add all event listeners and continue with the rest of init()...
+            document.addEventListener('mousedown', onMouseDown);
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+            document.addEventListener('wheel', onMouseWheel);
+            document.addEventListener('touchstart', onTouchStart, false);
+            document.addEventListener('touchmove', onTouchMove, false);
+            document.addEventListener('touchend', onTouchEnd, false);
+
+            window.addEventListener('resize', onWindowResize, false);
+
+            document.getElementById('fileInput').addEventListener('change', handleFileSelect);
+            document.getElementById('playButton').addEventListener('click', togglePlay);
+            document.getElementById('splitButton').addEventListener('click', toggleSplitScreen);
+            document.getElementById('vrButton').addEventListener('click', enterVR);
+            document.getElementById('gyroButton').addEventListener('click', toggleGyro);
+
+            if (window.DeviceOrientationEvent) {
+                window.addEventListener('deviceorientation', onDeviceOrientation);
+            } else {
+                document.getElementById('gyroButton').style.display = 'none';
+            }
+
+            navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+                if (!supported) {
+                    document.getElementById('vrButton').style.display = 'none';
+                }
+            });
+        }
+
+        // Modified device orientation handler
+        function onDeviceOrientation(event) {
+            if (!isUsingGyro) return;
+
+            if (!initialOrientation) {
+                initialOrientation = {
+                    alpha: event.alpha,
+                    beta: event.beta,
+                    gamma: event.gamma
+                };
+                return;
+            }
+
+            // Rotate 90 degrees by swapping beta and gamma and adjusting for the rotation
+            deviceAlpha = THREE.MathUtils.degToRad(event.alpha - initialOrientation.alpha);
+            deviceBeta = THREE.MathUtils.degToRad(event.gamma - initialOrientation.gamma); // Using gamma instead of beta
+            deviceGamma = THREE.MathUtils.degToRad(-(event.beta - initialOrientation.beta)); // Negating beta for correct orientation
+        }
+
+        // Keep all other functions exactly the same...
+        function onTouchStart(event) {
+            if (event.touches.length === 1) {
+                isMouseDown = true;
+                mouseX = event.touches[0].pageX;
+                mouseY = event.touches[0].pageY;
+            }
+        }
+
+        function onTouchMove(event) {
+            if (isMouseDown && event.touches.length === 1) {
+                const deltaX = event.touches[0].pageX - mouseX;
+                const deltaY = event.touches[0].pageY - mouseY;
+                
+                targetRotationX += deltaX * 0.002;
+                targetRotationY = Math.max(-Math.PI/2, Math.min(Math.PI/2, targetRotationY + deltaY * 0.002));
+                
+                mouseX = event.touches[0].pageX;
+                mouseY = event.touches[0].pageY;
+            }
+        }
+
+        function onTouchEnd() {
+            isMouseDown = false;
+        }
+
+        function toggleGyro() {
+            isUsingGyro = !isUsingGyro;
+            document.getElementById('gyroButton').textContent = isUsingGyro ? 'Disable Gyroscope' : 'Enable Gyroscope';
+            if (isUsingGyro) {
+                if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    DeviceOrientationEvent.requestPermission()
+                        .then(response => {
+                            if (response === 'granted') {
+                                initialOrientation = null;
+                            }
+                        })
+                        .catch(console.error);
+                } else {
+                    initialOrientation = null;
+                }
+            }
+        }
+
+        function onMouseDown(event) {
+            if (!isUsingGyro) {
+                isMouseDown = true;
+                mouseX = event.clientX;
+                mouseY = event.clientY;
+            }
+        }
+
+        function onMouseMove(event) {
+            if (isMouseDown && !isUsingGyro) {
+                const deltaX = event.clientX - mouseX;
+                const deltaY = event.clientY - mouseY;
+                
+                targetRotationX += deltaX * 0.002;
+                targetRotationY = Math.max(-Math.PI/2, Math.min(Math.PI/2, targetRotationY + deltaY * 0.002));
+                
+                mouseX = event.clientX;
+                mouseY = event.clientY;
+            }
+        }
+
+        function onMouseUp() {
+            isMouseDown = false;
+        }
+
+        function onMouseWheel(event) {
+            camera.fov = Math.max(30, Math.min(90, camera.fov + event.deltaY * 0.05));
+            camera.updateProjectionMatrix();
+            leftCamera.fov = camera.fov;
+            rightCamera.fov = camera.fov;
+            leftCamera.updateProjectionMatrix();
+            rightCamera.updateProjectionMatrix();
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            const videoUrl = URL.createObjectURL(file);
+            video.src = videoUrl;
+        }
+
+        function togglePlay() {
+            if (video.paused) {
+                video.play();
+                document.getElementById('playButton').textContent = 'Pause';
+            } else {
+                video.pause();
+                document.getElementById('playButton').textContent = 'Play';
+            }
+        }
+
+        function toggleSplitScreen() {
+            isSplitScreen = !isSplitScreen;
+            document.getElementById('splitButton').textContent = isSplitScreen ? 'Normal View' : 'Split Screen';
+            onWindowResize();
+        }
+
+        async function enterVR() {
+            try {
+                if (renderer.xr.isPresenting) {
+                    await renderer.xr.getSession().end();
+                } else {
+                    const session = await navigator.xr.requestSession('immersive-vr', {
+                        optionalFeatures: ['local-floor', 'bounded-floor']
+                    });
+                    
+                    session.addEventListener('end', () => {
+                        document.getElementById('vrButton').textContent = 'Enter VR';
+                    });
+                    
+                    await renderer.xr.setSession(session);
+                    document.getElementById('vrButton').textContent = 'Exit VR';
+                }
+            } catch (error) {
+                console.error('Error with VR:', error);
+                alert('Error entering VR mode. Make sure your VR headset is connected and your browser supports WebXR.');
+            }
+        }
+
+        function onWindowResize() {
+            if (isSplitScreen) {
+                const aspectRatio = (window.innerWidth / 2) / window.innerHeight;
+                leftCamera.aspect = aspectRatio;
+                rightCamera.aspect = aspectRatio;
+                leftCamera.updateProjectionMatrix();
+                rightCamera.updateProjectionMatrix();
+            } else {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+            }
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function updateCameraRotation() {
+            if (isUsingGyro && deviceAlpha !== null) {
+                // Use device orientation
+                currentRotationX = deviceAlpha;
+                currentRotationY = deviceBeta;
+            } else {
+                // Use mouse/touch controls
+                currentRotationX += (targetRotationX - currentRotationX) * 0.05;
+                currentRotationY += (targetRotationY - currentRotationY) * 0.05;
+            }
+
+            // Apply rotation to cameras
+            camera.rotation.y = currentRotationX;
+            camera.rotation.x = currentRotationY;
+            
+            leftCamera.rotation.y = currentRotationX;
+            leftCamera.rotation.x = currentRotationY;
+            
+            rightCamera.rotation.y = currentRotationX;
+            rightCamera.rotation.x = currentRotationY;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            updateCameraRotation();
+
+            if (renderer.xr.isPresenting) {
+                renderer.render(scene, camera);
+            } else if (isSplitScreen) {
+                // Render left eye
+                renderer.setScissorTest(true);
+                renderer.setScissor(0, 0, window.innerWidth / 2, window.innerHeight);
+                renderer.setViewport(0, 0, window.innerWidth / 2, window.innerHeight);
+                renderer.render(scene, leftCamera);
+
+                // Render right eye
+                renderer.setScissor(window.innerWidth / 2, 0, window.innerWidth / 2, window.innerHeight);
+                renderer.setViewport(window.innerWidth / 2, 0, window.innerWidth / 2, window.innerHeight);
+                renderer.render(scene, rightCamera);
+            } else {
+                renderer.setScissorTest(false);
+                renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+                renderer.render(scene, camera);
+            }
+        }
+    </script>
+</body>
+</html>
